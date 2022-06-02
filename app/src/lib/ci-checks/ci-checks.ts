@@ -10,7 +10,11 @@ import {
   IAPIWorkflowRun,
 } from '../api'
 import JSZip from 'jszip'
-import moment from 'moment'
+import { enableCICheckRunsLogs } from '../feature-flag'
+import { GitHubRepository } from '../../models/github-repository'
+import { Account } from '../../models/account'
+import { supportsRetrieveActionWorkflowByCheckSuiteId } from '../endpoint-capabilities'
+import { formatPreciseDuration } from '../format-duration'
 
 /**
  * A Desktop-specific model closely related to a GitHub API Check Run.
@@ -28,40 +32,12 @@ export interface IRefCheck {
   readonly status: APICheckStatus
   readonly conclusion: APICheckConclusion | null
   readonly appName: string
-  readonly checkSuiteId: number | null // API status don't have check suite id's
-  readonly output: IRefCheckOutput
   readonly htmlUrl: string | null
-  readonly actionsWorkflowRunId?: number
-  readonly logs_url?: string
-}
 
-/**
- * There are two types of check run outputs.
- *
- * 1. From GitHub Actions, which comes in steps with individual log texts,
- *    statuses, and duration info.
- * 2. From any other check run app, which comes with a generic string of
- *    whatever the check run app provides.
- */
-export type IRefCheckOutput =
-  | {
-      readonly title: string | null
-      readonly summary?: string | null
-      readonly type: RefCheckOutputType.Actions
-      readonly steps: ReadonlyArray<IAPIWorkflowJobStep>
-    }
-  | {
-      readonly title: string | null
-      readonly summary?: string | null
-      readonly type: RefCheckOutputType.Default
-      // This text is whatever a check run app decides to place in it.
-      // It may include html.
-      readonly text: string | null
-    }
-
-export enum RefCheckOutputType {
-  Actions = 'Actions',
-  Default = 'Default',
+  // Following are action check specific
+  readonly checkSuiteId: number | null
+  readonly actionJobSteps?: ReadonlyArray<IAPIWorkflowJobStep>
+  readonly actionsWorkflow?: IAPIWorkflowRun
 }
 
 /**
@@ -134,12 +110,7 @@ export function apiStatusToRefCheck(apiStatus: IAPIRefStatusItem): IRefCheck {
     conclusion,
     appName: '',
     checkSuiteId: null,
-    output: {
-      type: RefCheckOutputType.Default,
-      title: null,
-      text: null,
-    },
-    htmlUrl: null,
+    htmlUrl: apiStatus.target_url,
   }
 }
 
@@ -185,12 +156,12 @@ export function getCheckRunConclusionAdjective(
  * or failing...
  * @param conclusion - The conclusion of the check, something like success or
  * skipped...
- * @param durationSeconds - The time in seconds it took to complete.
+ * @param durationMs - The time in milliseconds it took to complete.
  */
 function getCheckRunShortDescription(
   status: APICheckStatus,
   conclusion: APICheckConclusion | null,
-  durationSeconds?: number
+  durationMs?: number
 ): string {
   if (status !== APICheckStatus.Completed || conclusion === null) {
     return 'In progress'
@@ -212,37 +183,20 @@ function getCheckRunShortDescription(
 
   const preposition = conclusion === APICheckConclusion.Success ? 'in' : 'after'
 
-  if (durationSeconds !== undefined && durationSeconds > 0) {
-    const duration =
-      durationSeconds < 60
-        ? `${durationSeconds}s`
-        : `${Math.round(durationSeconds / 60)}m`
-    return `${adjective} ${preposition} ${duration}`
+  if (durationMs !== undefined && durationMs > 0) {
+    return `${adjective} ${preposition} ${formatPreciseDuration(durationMs)}`
   }
 
   return adjective
 }
 
 /**
- * Attempts to get the duration of a check run in seconds.
- * If it fails, it returns 0
+ * Attempts to get the duration of a check run in milliseconds. Returns NaN if
+ * parsing either completed_at or started_at fails
  */
-export function getCheckDurationInSeconds(
+export const getCheckDurationInMilliseconds = (
   checkRun: IAPIRefCheckRun | IAPIWorkflowJobStep
-): number {
-  try {
-    // This could fail if the dates cannot be parsed.
-    const completedAt = new Date(checkRun.completed_at).getTime()
-    const startedAt = new Date(checkRun.started_at).getTime()
-    const duration = (completedAt - startedAt) / 1000
-
-    if (!isNaN(duration)) {
-      return duration
-    }
-  } catch (e) {}
-
-  return 0
-}
+) => Date.parse(checkRun.completed_at) - Date.parse(checkRun.started_at)
 
 /**
  * Convert an API check run object to a RefCheck model
@@ -254,16 +208,12 @@ export function apiCheckRunToRefCheck(checkRun: IAPIRefCheckRun): IRefCheck {
     description: getCheckRunShortDescription(
       checkRun.status,
       checkRun.conclusion,
-      getCheckDurationInSeconds(checkRun)
+      getCheckDurationInMilliseconds(checkRun)
     ),
     status: checkRun.status,
     conclusion: checkRun.conclusion,
     appName: checkRun.app.name,
     checkSuiteId: checkRun.check_suite.id,
-    output: {
-      ...checkRun.output,
-      type: RefCheckOutputType.Default,
-    },
     htmlUrl: checkRun.html_url,
   }
 }
@@ -377,12 +327,25 @@ export function getLatestCheckRunsByName(
   const latestCheckRunsByName = new Map<string, IAPIRefCheckRun>()
 
   for (const checkRun of checkRuns) {
-    const current = latestCheckRunsByName.get(checkRun.name)
+    // For release branches (maybe other scenarios?), there can be check runs
+    // with the same name, but are "push" events not "pull_request" events. For
+    // the push events, the pull_request array will be empty. For pull_request,
+    // the pull_request array should have the pull_request object in it. We want
+    // these runs treated separately even tho they have same name, they are not
+    // simply a repeat of the same run as they have a different origination. This
+    // feels hacky... but we don't have any other meta data on a check run that
+    // differieates these.
+    const nameAndHasPRs =
+      checkRun.name +
+      (checkRun.pull_requests.length > 0
+        ? 'isPullRequestCheckRun'
+        : 'isPushCheckRun')
+    const current = latestCheckRunsByName.get(nameAndHasPRs)
     if (
       current === undefined ||
       current.check_suite.id < checkRun.check_suite.id
     ) {
-      latestCheckRunsByName.set(checkRun.name, checkRun)
+      latestCheckRunsByName.set(nameAndHasPRs, checkRun)
     }
   }
 
@@ -402,46 +365,48 @@ export async function getLatestPRWorkflowRunsLogsForCheckRun(
   const jobsCache = new Map<number, IAPIWorkflowJobs | null>()
   const mappedCheckRuns = new Array<IRefCheck>()
   for (const cr of checkRuns) {
-    if (cr.actionsWorkflowRunId === undefined || cr.logs_url === undefined) {
+    if (cr.actionsWorkflow === undefined) {
+      mappedCheckRuns.push(cr)
+      continue
+    }
+    const { id: wfId, logs_url } = cr.actionsWorkflow
+    // Multiple check runs match a single workflow run.
+    // We can prevent several job network calls by caching them.
+    const workFlowRunJobs =
+      jobsCache.get(wfId) ?? (await api.fetchWorkflowRunJobs(owner, repo, wfId))
+    jobsCache.set(wfId, workFlowRunJobs)
+
+    const matchingJob = workFlowRunJobs?.jobs.find(j => j.id === cr.id)
+    if (matchingJob === undefined) {
       mappedCheckRuns.push(cr)
       continue
     }
 
-    // Multiple check runs match a single workflow run.
-    // We can prevent several job network calls by caching them.
-    const workFlowRunJobs =
-      jobsCache.get(cr.actionsWorkflowRunId) ??
-      (await api.fetchWorkflowRunJobs(owner, repo, cr.actionsWorkflowRunId))
-    jobsCache.set(cr.actionsWorkflowRunId, workFlowRunJobs)
+    if (!enableCICheckRunsLogs()) {
+      mappedCheckRuns.push({
+        ...cr,
+        htmlUrl: matchingJob.html_url,
+        actionJobSteps: matchingJob.steps,
+      })
 
-    // Here check run and jobs only share their names.
-    // Thus, unfortunately cannot match on a numerical id.
-    const matchingJob = workFlowRunJobs?.jobs.find(j => j.name === cr.name)
-    if (matchingJob === undefined) {
-      mappedCheckRuns.push(cr)
       continue
     }
 
     // One workflow can have the logs for multiple check runs.. no need to
     // keep retrieving it. So we are hashing it.
     const logZip =
-      logCache.get(cr.logs_url) ??
-      (await api.fetchWorkflowRunJobLogs(cr.logs_url))
+      logCache.get(logs_url) ?? (await api.fetchWorkflowRunJobLogs(logs_url))
     if (logZip === null) {
       mappedCheckRuns.push(cr)
       continue
     }
 
-    logCache.set(cr.logs_url, logZip)
+    logCache.set(logs_url, logZip)
 
     mappedCheckRuns.push({
       ...cr,
       htmlUrl: matchingJob.html_url,
-      output: {
-        ...cr.output,
-        type: RefCheckOutputType.Actions,
-        steps: await parseJobStepLogs(logZip, matchingJob),
-      },
+      actionJobSteps: await parseJobStepLogs(logZip, matchingJob),
     })
   }
 
@@ -449,8 +414,8 @@ export async function getLatestPRWorkflowRunsLogsForCheckRun(
 }
 
 /**
- * Retrieves the jobs and logs URLs from a list of check runs. Retruns a list
- * with the same check runs augmented with the job and logs URLs.
+ * Retrieves the action workflow run for the check runs and if exists updates
+ * the actionWorkflow property.
  *
  * @param api API instance used to retrieve the jobs and logs URLs
  * @param owner Owner of the repository
@@ -458,14 +423,46 @@ export async function getLatestPRWorkflowRunsLogsForCheckRun(
  * @param branchName Name of the branch to which the check runs belong
  * @param checkRuns List of check runs to augment
  */
-export async function getCheckRunActionsJobsAndLogURLS(
+export async function getCheckRunActionsWorkflowRuns(
+  account: Account,
+  owner: string,
+  repo: string,
+  branchName: string,
+  checkRuns: ReadonlyArray<IRefCheck>
+): Promise<ReadonlyArray<IRefCheck>> {
+  const api = API.fromAccount(account)
+  return supportsRetrieveActionWorkflowByCheckSuiteId(account.endpoint)
+    ? getCheckRunActionsWorkflowRunsByCheckSuiteId(api, owner, repo, checkRuns)
+    : getCheckRunActionsWorkflowRunsByBranchName(
+        api,
+        owner,
+        repo,
+        branchName,
+        checkRuns
+      )
+}
+
+/**
+ * Retrieves the action workflow runs by using the branchName they are
+ * associated with.
+ *
+ * Note: This approach has pit falls because it is possible for a pull request
+ * to have check runs initiated from two separate branches and therefore we do
+ * not get action workflows that exist for some pr check runs. For example,
+ * desktop releases auto generate a release branch from the release pr branch.
+ * The actions teams added a way to retrieve Action workflows via the check
+ * suite id to avoid these pitfalls. However, this will not be immediately
+ * available for GitHub Enterprise; thus, we keep approach to maintain GitHub
+ * Enterprise Server usage.
+ */
+async function getCheckRunActionsWorkflowRunsByBranchName(
   api: API,
   owner: string,
   repo: string,
   branchName: string,
   checkRuns: ReadonlyArray<IRefCheck>
 ): Promise<ReadonlyArray<IRefCheck>> {
-  const latestWorkflowRuns = await getLatestPRWorkflowRuns(
+  const latestWorkflowRuns = await getLatestPRWorkflowRunsByBranchName(
     api,
     owner,
     repo,
@@ -476,18 +473,70 @@ export async function getCheckRunActionsJobsAndLogURLS(
     return checkRuns
   }
 
-  return getCheckRunWithActionsJobAndLogURLs(checkRuns, latestWorkflowRuns)
+  return mapActionWorkflowsRunsToCheckRuns(checkRuns, latestWorkflowRuns)
+}
+
+/**
+ * Retrieves the action workflow runs by using the check suite id.
+ *
+ * If the check run is run using GitHub Actions, then there will be an actions
+ * workflow run with a matching check suite id that has the corresponding
+ * actions workflow.
+ */
+async function getCheckRunActionsWorkflowRunsByCheckSuiteId(
+  api: API,
+  owner: string,
+  repo: string,
+  checkRuns: ReadonlyArray<IRefCheck>
+): Promise<readonly IRefCheck[]> {
+  if (checkRuns.length === 0) {
+    return checkRuns
+  }
+
+  const mappedCheckRuns = new Array<IRefCheck>()
+  const actionsCache = new Map<number, IAPIWorkflowRun | null>()
+  for (const cr of checkRuns) {
+    if (cr.checkSuiteId === null) {
+      mappedCheckRuns.push(cr)
+      continue
+    }
+
+    // Multiple check runs share the same action workflow
+    const cachedActionWorkFlow = actionsCache.get(cr.checkSuiteId)
+    const actionsWorkflow =
+      cachedActionWorkFlow === undefined
+        ? await api.fetchPRActionWorkflowRunByCheckSuiteId(
+            owner,
+            repo,
+            cr.checkSuiteId
+          )
+        : cachedActionWorkFlow
+
+    actionsCache.set(cr.checkSuiteId, actionsWorkflow)
+
+    if (actionsWorkflow === null) {
+      mappedCheckRuns.push(cr)
+      continue
+    }
+
+    mappedCheckRuns.push({
+      ...cr,
+      actionsWorkflow,
+    })
+  }
+
+  return mappedCheckRuns
 }
 
 // Gets only the latest PR workflow runs hashed by name
-async function getLatestPRWorkflowRuns(
+async function getLatestPRWorkflowRunsByBranchName(
   api: API,
   owner: string,
   name: string,
   branchName: string
 ): Promise<ReadonlyArray<IAPIWorkflowRun>> {
   const wrMap = new Map<number, IAPIWorkflowRun>()
-  const allBranchWorkflowRuns = await api.fetchPRWorkflowRuns(
+  const allBranchWorkflowRuns = await api.fetchPRWorkflowRunsByBranchName(
     owner,
     name,
     branchName
@@ -517,7 +566,7 @@ async function getLatestPRWorkflowRuns(
   return Array.from(wrMap.values())
 }
 
-function getCheckRunWithActionsJobAndLogURLs(
+function mapActionWorkflowsRunsToCheckRuns(
   checkRuns: ReadonlyArray<IRefCheck>,
   actionWorkflowRuns: ReadonlyArray<IAPIWorkflowRun>
 ): ReadonlyArray<IRefCheck> {
@@ -535,11 +584,9 @@ function getCheckRunWithActionsJobAndLogURLs(
       continue
     }
 
-    const { id, logs_url } = matchingWR
     mappedCheckRuns.push({
       ...cr,
-      actionsWorkflowRunId: id,
-      logs_url,
+      actionsWorkflow: matchingWR,
     })
   }
 
@@ -552,8 +599,170 @@ function getCheckRunWithActionsJobAndLogURLs(
  */
 export function getFormattedCheckRunDuration(
   checkRun: IAPIRefCheckRun | IAPIWorkflowJobStep
-): string {
-  return moment
-    .duration(getCheckDurationInSeconds(checkRun), 'seconds')
-    .format('d[d] h[h] m[m] s[s]', { largest: 4 })
+) {
+  const duration = getCheckDurationInMilliseconds(checkRun)
+  return isNaN(duration) ? '' : formatPreciseDuration(duration)
 }
+
+/**
+ * Generates the URL pointing to the details of a given check run. If that check
+ * run has no specific URL, returns the URL of the associated pull request.
+ *
+ * @param checkRun Check run to generate the URL for
+ * @param step Check run step to generate the URL for
+ * @param repository Repository to which the check run belongs
+ * @param pullRequestNumber Number of PR associated with the check run
+ */
+export function getCheckRunStepURL(
+  checkRun: IRefCheck,
+  step: IAPIWorkflowJobStep,
+  repository: GitHubRepository,
+  pullRequestNumber: number
+): string | null {
+  if (checkRun.htmlUrl === null && repository.htmlURL === null) {
+    // A check run may not have a url depending on how it is setup.
+    // However, the repository should have one; Thus, we shouldn't hit this
+    return null
+  }
+
+  const url =
+    checkRun.htmlUrl !== null
+      ? `${checkRun.htmlUrl}/#step:${step.number}:1`
+      : `${repository.htmlURL}/pull/${pullRequestNumber}`
+
+  return url
+}
+
+/**
+ * Groups check runs by their actions workflow name and actions workflow event type.
+ * Event type only gets grouped if there are more than one event.
+ * Also sorts the check runs in the groups by their names.
+ *
+ * @param checkRuns
+ * @returns A map of grouped check runs.
+ */
+export function getCheckRunsGroupedByActionWorkflowNameAndEvent(
+  checkRuns: ReadonlyArray<IRefCheck>
+): Map<string, ReadonlyArray<IRefCheck>> {
+  const checkRunEvents = new Set(
+    checkRuns
+      .map(c => c.actionsWorkflow?.event)
+      .filter(c => c !== undefined && c.trim() !== '')
+  )
+  const checkRunsHaveMultipleEventTypes = checkRunEvents.size > 1
+
+  const groups = new Map<string, IRefCheck[]>()
+  for (const checkRun of checkRuns) {
+    let group = checkRun.actionsWorkflow?.name || 'Other'
+
+    if (
+      checkRunsHaveMultipleEventTypes &&
+      checkRun.actionsWorkflow !== undefined &&
+      checkRun.actionsWorkflow.event.trim() !== ''
+    ) {
+      group = `${group} (${checkRun.actionsWorkflow.event})`
+    }
+
+    if (group === 'Other' && checkRun.appName === 'GitHub Code Scanning') {
+      group = 'Code scanning results'
+    }
+
+    const existingGroup = groups.get(group)
+    const newGroup =
+      existingGroup !== undefined ? [...existingGroup, checkRun] : [checkRun]
+    groups.set(group, newGroup)
+  }
+
+  const sortedGroupNames = getCheckRunGroupNames(groups)
+
+  sortedGroupNames.forEach(gn => {
+    const group = groups.get(gn)
+    if (group !== undefined) {
+      const sortedGroup = group.sort((a, b) => a.name.localeCompare(b.name))
+      groups.set(gn, sortedGroup)
+    }
+  })
+
+  return groups
+}
+
+/**
+ * Gets the check run group names from the map and sorts them alphebetically with Other being last.
+ */
+export function getCheckRunGroupNames(
+  checkRunGroups: Map<string, ReadonlyArray<IRefCheck>>
+): ReadonlyArray<string> {
+  const groupNames = [...checkRunGroups.keys()]
+
+  // Sort names with 'Other' always last.
+  groupNames.sort((a, b) => {
+    if (a === 'Other' && b !== 'Other') {
+      return 1
+    }
+
+    if (a !== 'Other' && b === 'Other') {
+      return -1
+    }
+
+    if (a === 'Other' && b === 'Other') {
+      return 0
+    }
+
+    return a.localeCompare(b)
+  })
+
+  return groupNames
+}
+
+export function manuallySetChecksToPending(
+  cachedChecks: ReadonlyArray<IRefCheck>,
+  pendingChecks: ReadonlyArray<IRefCheck>
+): ICombinedRefCheck | null {
+  const updatedChecks: IRefCheck[] = []
+  for (const check of cachedChecks) {
+    const matchingCheck = pendingChecks.find(c => check.id === c.id)
+    if (matchingCheck === undefined) {
+      updatedChecks.push(check)
+      continue
+    }
+
+    updatedChecks.push({
+      ...check,
+      status: APICheckStatus.InProgress,
+      conclusion: null,
+      actionJobSteps: check.actionJobSteps?.map(js => ({
+        ...js,
+        status: APICheckStatus.InProgress,
+        conclusion: null,
+      })),
+    })
+  }
+  return createCombinedCheckFromChecks(updatedChecks)
+}
+
+/**
+ * Groups and totals the checks by their conclusion if not null and otherwise by their status.
+ *
+ * @param checks
+ * @returns Returns a map with key of conclusions or status and values of count of that conclustion or status
+ */
+export function getCheckStatusCountMap(checks: ReadonlyArray<IRefCheck>) {
+  const countByStatus = new Map<string, number>()
+  checks.forEach(check => {
+    const key = check.conclusion ?? check.status
+    const currentCount: number = countByStatus.get(key) ?? 0
+    countByStatus.set(key, currentCount + 1)
+  })
+
+  return countByStatus
+}
+
+/**
+ * An array of check conclusions that are considerd a failure.
+ */
+export const FailingCheckConclusions = [
+  APICheckConclusion.Failure,
+  APICheckConclusion.Canceled,
+  APICheckConclusion.ActionRequired,
+  APICheckConclusion.TimedOut,
+]

@@ -4,7 +4,7 @@ import { clipboard } from 'electron'
 import { Repository } from '../../models/repository'
 import { Octicon, iconForRepository } from '../octicons'
 import * as OcticonSymbol from '../octicons/octicons.generated'
-import { showContextualMenu } from '../main-process-proxy'
+import { showContextualMenu } from '../../lib/menu-item'
 import { Repositoryish } from './group-repositories'
 import { IMenuItem } from '../../lib/menu-item'
 import { HighlightText } from '../lib/highlight-text'
@@ -18,6 +18,7 @@ import { enableRepositoryAliases } from '../../lib/feature-flag'
 import classNames from 'classnames'
 import { createObservableRef } from '../lib/observable-ref'
 import { Tooltip } from '../lib/tooltip'
+import { TooltippedContent } from '../lib/tooltipped-content'
 
 interface IRepositoryListItemProps {
   readonly repository: Repositoryish
@@ -30,6 +31,9 @@ interface IRepositoryListItemProps {
 
   /** Called when the repository should be shown in Finder/Explorer/File Manager. */
   readonly onShowRepository: (repository: Repositoryish) => void
+
+  /** Called when the repository should be opened on GitHub in the default web browser. */
+  readonly onViewOnGitHub: (repository: Repositoryish) => void
 
   /** Called when the repository should be shown in the shell. */
   readonly onOpenInShell: (repository: Repositoryish) => void
@@ -152,6 +156,8 @@ export class RepositoryListItem extends React.Component<
 
     const repository = this.props.repository
     const missing = repository instanceof Repository && repository.missing
+    const github =
+      repository instanceof Repository && repository.gitHubRepository != null
     const openInExternalEditor = this.props.externalEditorLabel
       ? `Open in ${this.props.externalEditorLabel}`
       : DefaultEditorLabel
@@ -163,6 +169,11 @@ export class RepositoryListItem extends React.Component<
         action: this.copyToClipboard,
       },
       { type: 'separator' },
+      {
+        label: 'View on GitHub',
+        action: this.viewOnGitHub,
+        enabled: github,
+      },
       {
         label: `Open in ${this.props.shellLabel}`,
         action: this.openInShell,
@@ -221,6 +232,10 @@ export class RepositoryListItem extends React.Component<
 
   private showRepository = () => {
     this.props.onShowRepository(this.props.repository)
+  }
+
+  private viewOnGitHub = () => {
+    this.props.onViewOnGitHub(this.props.repository)
   }
 
   private openInShell = () => {
@@ -283,12 +298,12 @@ const renderAheadBehindIndicator = (aheadBehind: IAheadBehind) => {
 
 const renderChangesIndicator = () => {
   return (
-    <div
+    <TooltippedContent
       className="change-indicator-wrapper"
-      title="There are uncommitted changes in this repository"
+      tooltip="There are uncommitted changes in this repository"
     >
       <Octicon symbol={OcticonSymbol.dotFill} />
-    </div>
+    </TooltippedContent>
   )
 }
 

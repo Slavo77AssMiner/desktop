@@ -4,6 +4,7 @@
 .diff-code-mirror {
   flex-grow: 1;
   min-width: 0;
+  overflow-y: auto;
 }
 
 .diff-code-mirror .CodeMirror {
@@ -276,8 +277,18 @@
     background: var(--diff-add-background-color);
 
     @include high-contrast {
-      border: var(--hc-diff-add-border);
+      border-right: var(--hc-diff-add-border);
+      border-left: var(--hc-diff-add-border);
       margin-top: 1px;
+
+      &.is-first {
+        margin-top: 1px;
+        border-top: var(--hc-diff-add-border);
+      }
+
+      &.is-last {
+        border-bottom: var(--hc-diff-add-border);
+      }
     }
   }
 
@@ -285,7 +296,17 @@
     background: var(--diff-delete-background-color);
 
     @include high-contrast {
-      border: var(--hc-diff-delete-border);
+      border-right: var(--hc-diff-delete-border);
+      border-left: var(--hc-diff-delete-border);
+
+      &.is-first {
+        margin-top: 1px;
+        border-top: var(--hc-diff-delete-border);
+      }
+
+      &.is-last {
+        border-bottom: var(--hc-diff-delete-border);
+      }
     }
   }
 
@@ -761,6 +782,7 @@
 
 .seamless-diff-switcher {
   display: flex;
+  flex-direction: column;
   flex-grow: 1;
   min-width: 0;
   overflow: hidden;
@@ -773,6 +795,22 @@
     display: none;
     opacity: 0;
     pointer-events: none;
+  }
+
+  .hidden-bidi-chars-warning {
+    background-color: var(--file-warning-background-color);
+    padding: var(--spacing) var(--spacing-double);
+    border-bottom: var(--file-warning-border-color) solid 1px;
+
+    .octicon {
+      margin-right: var(--spacing);
+      color: var(--file-warning-color);
+      vertical-align: text-bottom;
+    }
+
+    a.link-button-component {
+      display: unset;
+    }
   }
 
   // When loading a diff

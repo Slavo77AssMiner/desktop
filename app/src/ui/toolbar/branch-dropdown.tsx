@@ -18,6 +18,7 @@ import classNames from 'classnames'
 import { dragAndDropManager } from '../../lib/drag-and-drop-manager'
 import { DragType } from '../../models/drag-drop'
 import { CICheckRunPopover } from '../check-runs/ci-check-run-popover'
+import { TooltipTarget } from '../lib/tooltip'
 
 interface IBranchDropdownProps {
   readonly dispatcher: Dispatcher
@@ -53,10 +54,14 @@ interface IBranchDropdownProps {
 
   /** Whether this component should show its onboarding tutorial nudge arrow */
   readonly shouldNudge: boolean
-}
 
+  readonly showCIStatusPopover: boolean
+
+  /** Map from the emoji shortcut (e.g., :+1:) to the image's local path. */
+  readonly emoji: Map<string, string>
+}
 interface IBranchDropdownState {
-  readonly isPopoverOpen: boolean
+  readonly badgeBottom: number
 }
 
 /**
@@ -69,7 +74,7 @@ export class BranchDropdown extends React.Component<
   public constructor(props: IBranchDropdownProps) {
     super(props)
     this.state = {
-      isPopoverOpen: false,
+      badgeBottom: 0,
     }
   }
 
@@ -92,6 +97,7 @@ export class BranchDropdown extends React.Component<
         pullRequests={this.props.pullRequests}
         currentPullRequest={this.props.currentPullRequest}
         isLoadingPullRequests={this.props.isLoadingPullRequests}
+        emoji={this.props.emoji}
       />
     )
   }
@@ -135,13 +141,12 @@ export class BranchDropdown extends React.Component<
         b => !b.isDesktopForkRemoteBranch
       )
     } else if (tip.kind === TipState.Detached) {
-      title = `On ${tip.currentSha.substr(0, 7)}`
+      title = `On ${tip.currentSha.substring(0, 7)}`
       tooltip = 'Currently on a detached HEAD'
       icon = OcticonSymbol.gitCommit
       description = 'Detached HEAD'
     } else if (tip.kind === TipState.Valid) {
-      title = tip.branch.name
-      tooltip = `Current branch is ${title}`
+      title = tooltip = tip.branch.name
     } else {
       return assertNever(tip, `Unknown tip state: ${tipKind}`)
     }
@@ -157,6 +162,7 @@ export class BranchDropdown extends React.Component<
         description = `${description} (${friendlyProgress}%)`
       }
 
+      tooltip = `Switching to ${checkoutProgress.targetBranch}`
       progressValue = checkoutProgress.value
       icon = syncClockwise
       iconClassName = 'spin'
@@ -167,6 +173,7 @@ export class BranchDropdown extends React.Component<
       icon = OcticonSymbol.gitBranch
       canOpen = false
       disabled = true
+      tooltip = `Rebasing ${conflictState.targetBranch}`
     }
 
     const isOpen = this.props.isOpen
@@ -192,10 +199,12 @@ export class BranchDropdown extends React.Component<
           progressValue={progressValue}
           buttonClassName={buttonClassName}
           onMouseEnter={this.onMouseEnter}
+          onlyShowTooltipWhenOverflowed={true}
+          isOverflowed={isDescriptionOverflowed}
         >
           {this.renderPullRequestInfo()}
         </ToolbarDropdown>
-        {this.state.isPopoverOpen && this.renderPopover()}
+        {this.props.showCIStatusPopover && this.renderPopover()}
       </>
     )
   }
@@ -214,48 +223,57 @@ export class BranchDropdown extends React.Component<
   }
 
   private onBadgeClick = () => {
-    if (this.state.isPopoverOpen) {
-      this.closePopover()
-    } else {
-      this.props.dispatcher.closeFoldout(FoldoutType.Branch)
-      this.openPopover()
-    }
+    // The badge can't be clicked while the CI status popover is shown, because
+    // in that case the Popover component will recognize the "click outside"
+    // event and close the popover.
+    this.props.dispatcher.closeFoldout(FoldoutType.Branch)
+    this.openPopover()
+  }
+
+  private updateBadgeBottomPosition = (badgeBottom: number) => {
+    this.setState({ badgeBottom })
   }
 
   private openPopover = () => {
-    this.setState(prevState => {
-      if (!prevState.isPopoverOpen) {
-        return { isPopoverOpen: true }
-      }
-      return null
-    })
+    this.props.dispatcher.setShowCIStatusPopover(true)
   }
 
   private closePopover = (event?: MouseEvent) => {
     if (event === undefined) {
-      this.setState({ isPopoverOpen: false })
+      this.props.dispatcher.setShowCIStatusPopover(false)
       return
     }
 
     const { target } = event
     const prBadgeElem = document.getElementById('pr-badge')
+    const rerunDialog = document.getElementById('rerun-check-runs')
     if (
-      prBadgeElem !== null &&
       target !== null &&
       target instanceof Node &&
-      prBadgeElem.contains(target)
+      ((prBadgeElem !== null && prBadgeElem.contains(target)) ||
+        (rerunDialog !== null && rerunDialog.contains(target)))
     ) {
       return
     }
 
-    this.setState({ isPopoverOpen: false })
+    this.props.dispatcher.setShowCIStatusPopover(false)
   }
 
   private renderPopover() {
     const pr = this.props.currentPullRequest
     const { tip } = this.props.repositoryState.branchesState
-    // It is ok if it doesn't exist, we just can't retrieve actions workflows
-    const currentBranchName = tip.kind === TipState.Valid ? tip.branch.name : ''
+    // This is used for retrieving the PR's action check runs (if exist). For
+    // forked repo PRs, we must use the upstreamWithoutRemote as we make are own
+    // temporary branch in Desktop for these that doesn't exist remotely (and
+    // thus doesn't exist in action's world). The upstreamWIthoutRemote will
+    // match a non forked PR. It _should_ only be null for a local branch..
+    // which _should_ not happen in this context. But, worst case, the user
+    // simply won't be able to retreive action steps and will get check run list
+    // items that are given for non-action checks.
+    const currentBranchName =
+      tip.kind === TipState.Valid
+        ? tip.branch.upstreamWithoutRemote ?? tip.branch.name
+        : ''
 
     if (pr === null) {
       return null
@@ -267,6 +285,7 @@ export class BranchDropdown extends React.Component<
         dispatcher={this.props.dispatcher}
         repository={pr.base.gitHubRepository}
         branchName={currentBranchName}
+        badgeBottom={this.state.badgeBottom}
         closePopover={this.closePopover}
       />
     )
@@ -285,7 +304,13 @@ export class BranchDropdown extends React.Component<
         dispatcher={this.props.dispatcher}
         repository={pr.base.gitHubRepository}
         onBadgeClick={this.onBadgeClick}
+        onBadgeBottomPositionUpdate={this.updateBadgeBottomPosition}
       />
     )
   }
+}
+
+const isDescriptionOverflowed = (target: TooltipTarget) => {
+  const elem = target.querySelector('.title') ?? target
+  return elem.scrollWidth > elem.clientWidth
 }

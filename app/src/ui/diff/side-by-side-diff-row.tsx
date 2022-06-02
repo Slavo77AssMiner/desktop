@@ -18,6 +18,7 @@ import { DiffExpansionKind } from './text-diff-expansion'
 import { PopoverCaretPosition } from '../lib/popover'
 import { WhitespaceHintPopover } from './whitespace-hint-popover'
 import { TooltippedContent } from '../lib/tooltipped-content'
+import { TooltipDirection } from '../lib/tooltip'
 
 interface ISideBySideDiffRowProps {
   /**
@@ -120,6 +121,16 @@ interface ISideBySideDiffRowProps {
    */
   readonly onContextMenuText: () => void
 
+  /**
+   * Array of classes applied to the after section of a row
+   */
+  readonly afterClassNames: ReadonlyArray<string>
+
+  /**
+   * Array of classes applied to the before section of a row
+   */
+  readonly beforeClassNames: ReadonlyArray<string>
+
   /** Called when the user changes the hide whitespace in diffs setting. */
   readonly onHideWhitespaceInDiffChanged: (checked: boolean) => void
 }
@@ -137,8 +148,11 @@ export class SideBySideDiffRow extends React.Component<
     this.state = { showWhitespaceHint: undefined }
   }
   public render() {
-    const { row, showSideBySideDiff } = this.props
+    const { row, showSideBySideDiff, beforeClassNames, afterClassNames } =
+      this.props
 
+    const beforeClasses = classNames('before', ...beforeClassNames)
+    const afterClasses = classNames('after', ...afterClassNames)
     switch (row.type) {
       case DiffRowType.Hunk: {
         const className = ['row', 'hunk-info']
@@ -187,7 +201,7 @@ export class SideBySideDiffRow extends React.Component<
               className="row added"
               onMouseEnter={this.onMouseEnterLineNumber}
             >
-              <div className="after">
+              <div className={afterClasses}>
                 {this.renderLineNumbers([undefined, lineNumber], isSelected)}
                 {this.renderHunkHandle()}
                 {this.renderContent(row.data)}
@@ -199,17 +213,17 @@ export class SideBySideDiffRow extends React.Component<
 
         return (
           <div className="row added" onMouseEnter={this.onMouseEnterLineNumber}>
-            <div className="before">
+            <div className={beforeClasses}>
               {this.renderLineNumber()}
               {this.renderContentFromString('')}
               {this.renderWhitespaceHintPopover(DiffColumn.Before)}
             </div>
-            {this.renderHunkHandle()}
-            <div className="after">
+            <div className={afterClasses}>
               {this.renderLineNumber(lineNumber, isSelected)}
               {this.renderContent(row.data)}
               {this.renderWhitespaceHintPopover(DiffColumn.After)}
             </div>
+            {this.renderHunkHandle()}
           </div>
         )
       }
@@ -221,7 +235,7 @@ export class SideBySideDiffRow extends React.Component<
               className="row deleted"
               onMouseEnter={this.onMouseEnterLineNumber}
             >
-              <div className="before">
+              <div className={beforeClasses}>
                 {this.renderLineNumbers([lineNumber, undefined], isSelected)}
                 {this.renderHunkHandle()}
                 {this.renderContent(row.data)}
@@ -236,17 +250,17 @@ export class SideBySideDiffRow extends React.Component<
             className="row deleted"
             onMouseEnter={this.onMouseEnterLineNumber}
           >
-            <div className="before">
+            <div className={beforeClasses}>
               {this.renderLineNumber(lineNumber, isSelected)}
               {this.renderContent(row.data)}
               {this.renderWhitespaceHintPopover(DiffColumn.Before)}
             </div>
-            {this.renderHunkHandle()}
-            <div className="after">
+            <div className={afterClasses}>
               {this.renderLineNumber()}
               {this.renderContentFromString('')}
               {this.renderWhitespaceHintPopover(DiffColumn.After)}
             </div>
+            {this.renderHunkHandle()}
           </div>
         )
       }
@@ -254,17 +268,23 @@ export class SideBySideDiffRow extends React.Component<
         const { beforeData: before, afterData: after } = row
         return (
           <div className="row modified">
-            <div className="before" onMouseEnter={this.onMouseEnterLineNumber}>
+            <div
+              className={beforeClasses}
+              onMouseEnter={this.onMouseEnterLineNumber}
+            >
               {this.renderLineNumber(before.lineNumber, before.isSelected)}
               {this.renderContent(before)}
               {this.renderWhitespaceHintPopover(DiffColumn.Before)}
             </div>
-            {this.renderHunkHandle()}
-            <div className="after" onMouseEnter={this.onMouseEnterLineNumber}>
+            <div
+              className={afterClasses}
+              onMouseEnter={this.onMouseEnterLineNumber}
+            >
               {this.renderLineNumber(after.lineNumber, after.isSelected)}
               {this.renderContent(after)}
               {this.renderWhitespaceHintPopover(DiffColumn.After)}
             </div>
+            {this.renderHunkHandle()}
           </div>
         )
       }
@@ -371,7 +391,10 @@ export class SideBySideDiffRow extends React.Component<
         style={{ width: this.props.lineNumberWidth }}
         onContextMenu={this.props.onContextMenuExpandHunk}
       >
-        <TooltippedContent direction="s" tooltip={elementInfo.title}>
+        <TooltippedContent
+          direction={TooltipDirection.SOUTH}
+          tooltip={elementInfo.title}
+        >
           <Octicon symbol={elementInfo.icon} />
         </TooltippedContent>
       </div>

@@ -4,9 +4,8 @@ import QuickLRU from 'quick-lru'
 import { Account } from '../../models/account'
 import { AccountsStore } from './accounts-store'
 import { GitHubRepository } from '../../models/github-repository'
-import { API, getAccountForEndpoint } from '../api'
-import { IDisposable, Disposable } from 'event-kit'
-import { setAlmostImmediate } from '../set-almost-immediate'
+import { API, getAccountForEndpoint, IAPICheckSuite } from '../api'
+import { DisposableLike, Disposable } from 'event-kit'
 import {
   ICombinedRefCheck,
   IRefCheck,
@@ -15,8 +14,11 @@ import {
   getLatestCheckRunsByName,
   apiStatusToRefCheck,
   getLatestPRWorkflowRunsLogsForCheckRun,
-  getCheckRunActionsJobsAndLogURLS,
+  getCheckRunActionsWorkflowRuns,
+  manuallySetChecksToPending,
 } from '../ci-checks/ci-checks'
+import _ from 'lodash'
+import { offsetFromNow } from '../offset-from'
 
 interface ICommitStatusCacheEntry {
   /**
@@ -57,6 +59,9 @@ interface IRefStatusSubscription {
 
   /** One or more callbacks to notify when the commit status is updated */
   readonly callbacks: Set<StatusCallBack>
+
+  /** If provided, we retrieve the actions workflow runs or the checks with this sub */
+  readonly branchName?: string
 }
 
 /**
@@ -204,7 +209,7 @@ export class CommitStatusStore {
   private queueRefresh() {
     if (!this.refreshQueued) {
       this.refreshQueued = true
-      setAlmostImmediate(() => {
+      setImmediate(() => {
         this.refreshQueued = false
         this.refreshEligibleSubscriptions()
       })
@@ -235,6 +240,28 @@ export class CommitStatusStore {
 
       this.queue.add(key)
     }
+  }
+
+  public async manualRefreshSubscription(
+    repository: GitHubRepository,
+    ref: string,
+    pendingChecks: ReadonlyArray<IRefCheck>
+  ) {
+    const key = getCacheKeyForRepository(repository, ref)
+    const subscription = this.subscriptions.get(key)
+
+    if (subscription === undefined) {
+      return
+    }
+
+    const cache = this.cache.get(key)?.check
+    if (cache === undefined || cache === null) {
+      return
+    }
+
+    const check = manuallySetChecksToPending(cache.checks, pendingChecks)
+    this.cache.set(key, { check, fetchedAt: new Date() })
+    subscription.callbacks.forEach(cb => cb(check))
   }
 
   private async refreshSubscription(key: string) {
@@ -289,9 +316,71 @@ export class CommitStatusStore {
       checks.push(...latestCheckRunsByName.map(apiCheckRunToRefCheck))
     }
 
-    const check = createCombinedCheckFromChecks(checks)
+    let checksWithActions = null
+    if (subscription.branchName !== undefined) {
+      checksWithActions = await this.getAndMapActionWorkflowRunsToCheckRuns(
+        checks,
+        key,
+        subscription.branchName
+      )
+    }
+
+    const check = createCombinedCheckFromChecks(checksWithActions ?? checks)
     this.cache.set(key, { check, fetchedAt: new Date() })
     subscription.callbacks.forEach(cb => cb(check))
+  }
+
+  private async getAndMapActionWorkflowRunsToCheckRuns(
+    checks: ReadonlyArray<IRefCheck>,
+    key: string,
+    branchName: string
+  ): Promise<ReadonlyArray<IRefCheck> | null> {
+    const existingChecks = this.cache.get(key)
+
+    // If the checks haven't changed since last status refresh, don't bother
+    // retrieving actions workflows and they could be stale if this is directly after a rerun
+    if (
+      existingChecks !== undefined &&
+      existingChecks.check !== null &&
+      existingChecks.check.checks.some(c => c.actionsWorkflow !== undefined) &&
+      _.xor(
+        existingChecks.check.checks.map(cr => cr.id),
+        checks.map(cr => cr.id)
+      ).length === 0
+    ) {
+      // Apply existing action workflow and job steps from cache to refreshed checks
+      const mapped = new Array<IRefCheck>()
+      for (const cr of checks) {
+        const matchingCheck = existingChecks.check.checks.find(
+          c => c.id === cr.id
+        )
+
+        if (matchingCheck === undefined) {
+          // Shouldn't happen, but if it did just keep what we have
+          mapped.push(cr)
+          continue
+        }
+
+        const { actionsWorkflow, actionJobSteps } = matchingCheck
+        mapped.push({
+          ...cr,
+          actionsWorkflow,
+          actionJobSteps,
+        })
+      }
+      return mapped
+    }
+
+    const checkRunsWithActionsWorkflows =
+      await this.getCheckRunActionsWorkflowRuns(key, branchName, checks)
+
+    const checkRunsWithActionsWorkflowJobs =
+      await this.mapActionWorkflowRunsJobsToCheckRuns(
+        key,
+        checkRunsWithActionsWorkflows
+      )
+
+    return checkRunsWithActionsWorkflowJobs
   }
 
   /**
@@ -303,18 +392,49 @@ export class CommitStatusStore {
    */
   public tryGetStatus(
     repository: GitHubRepository,
-    ref: string
+    ref: string,
+    branchName?: string
   ): ICombinedRefCheck | null {
     const key = getCacheKeyForRepository(repository, ref)
+    if (
+      branchName !== undefined &&
+      this.subscriptions.get(key)?.branchName !== branchName
+    ) {
+      return null
+    }
+
     return this.cache.get(key)?.check ?? null
   }
 
-  private getOrCreateSubscription(repository: GitHubRepository, ref: string) {
+  private getOrCreateSubscription(
+    repository: GitHubRepository,
+    ref: string,
+    branchName?: string
+  ) {
     const key = getCacheKeyForRepository(repository, ref)
     let subscription = this.subscriptions.get(key)
 
     if (subscription !== undefined) {
-      return subscription
+      if (subscription.branchName === branchName) {
+        return subscription
+      }
+
+      const withBranchName = { ...subscription, branchName }
+      this.subscriptions.set(key, withBranchName)
+      const cache = this.cache.get(key)
+      if (cache !== undefined) {
+        this.cache.set(key, {
+          ...cache,
+          // The commit status store is set to only retreive on a refresh
+          // trigger if the subscription has not been fetched for 60 minutes
+          // (cache/api limit). This sets this sub back to 61 so that on next
+          // refresh triggered, it will be reretreived, as this time, it will be
+          // different given the branch name is provided.
+          fetchedAt: new Date(offsetFromNow(-61, 'minutes')),
+        })
+      }
+
+      return withBranchName
     }
 
     subscription = {
@@ -323,6 +443,7 @@ export class CommitStatusStore {
       name: repository.name,
       ref,
       callbacks: new Set<StatusCallBack>(),
+      branchName,
     }
 
     this.subscriptions.set(key, subscription)
@@ -342,10 +463,15 @@ export class CommitStatusStore {
   public subscribe(
     repository: GitHubRepository,
     ref: string,
-    callback: StatusCallBack
-  ): IDisposable {
+    callback: StatusCallBack,
+    branchName?: string
+  ): DisposableLike {
     const key = getCacheKeyForRepository(repository, ref)
-    const subscription = this.getOrCreateSubscription(repository, ref)
+    const subscription = this.getOrCreateSubscription(
+      repository,
+      ref,
+      branchName
+    )
 
     subscription.callbacks.add(callback)
     this.queueRefresh()
@@ -359,16 +485,14 @@ export class CommitStatusStore {
   }
 
   /**
-   * Retrieve GitHub Actions workflows and populates the job and log url if
-   * applicable to the checkruns
+   * Retrieve GitHub Actions workflows and maps them to the check runs if
+   * applicable
    */
-  public async getCheckRunActionsJobsAndLogURLS(
-    repository: GitHubRepository,
-    ref: string,
+  private async getCheckRunActionsWorkflowRuns(
+    key: string,
     branchName: string,
     checkRuns: ReadonlyArray<IRefCheck>
   ): Promise<ReadonlyArray<IRefCheck>> {
-    const key = getCacheKeyForRepository(repository, ref)
     const subscription = this.subscriptions.get(key)
     if (subscription === undefined) {
       return checkRuns
@@ -380,9 +504,8 @@ export class CommitStatusStore {
       return checkRuns
     }
 
-    const api = API.fromAccount(account)
-    return getCheckRunActionsJobsAndLogURLS(
-      api,
+    return getCheckRunActionsWorkflowRuns(
+      account,
       owner,
       name,
       branchName,
@@ -393,12 +516,10 @@ export class CommitStatusStore {
   /**
    * Retrieve GitHub Actions job and logs for the check runs.
    */
-  public async getLatestPRWorkflowRunsLogsForCheckRun(
-    repository: GitHubRepository,
-    ref: string,
+  private async mapActionWorkflowRunsJobsToCheckRuns(
+    key: string,
     checkRuns: ReadonlyArray<IRefCheck>
   ): Promise<ReadonlyArray<IRefCheck>> {
-    const key = getCacheKeyForRepository(repository, ref)
     const subscription = this.subscriptions.get(key)
     if (subscription === undefined) {
       return checkRuns
@@ -428,5 +549,47 @@ export class CommitStatusStore {
 
     const api = API.fromAccount(account)
     return api.rerequestCheckSuite(owner.login, name, checkSuiteId)
+  }
+
+  public async rerunJob(
+    repository: GitHubRepository,
+    jobId: number
+  ): Promise<boolean> {
+    const { owner, name } = repository
+    const account = getAccountForEndpoint(this.accounts, repository.endpoint)
+    if (account === null) {
+      return false
+    }
+
+    const api = API.fromAccount(account)
+    return api.rerunJob(owner.login, name, jobId)
+  }
+
+  public async rerunFailedJobs(
+    repository: GitHubRepository,
+    workflowRunId: number
+  ): Promise<boolean> {
+    const { owner, name } = repository
+    const account = getAccountForEndpoint(this.accounts, repository.endpoint)
+    if (account === null) {
+      return false
+    }
+
+    const api = API.fromAccount(account)
+    return api.rerunFailedJobs(owner.login, name, workflowRunId)
+  }
+
+  public async fetchCheckSuite(
+    repository: GitHubRepository,
+    checkSuiteId: number
+  ): Promise<IAPICheckSuite | null> {
+    const { owner, name } = repository
+    const account = getAccountForEndpoint(this.accounts, repository.endpoint)
+    if (account === null) {
+      return null
+    }
+
+    const api = API.fromAccount(account)
+    return api.fetchCheckSuite(owner.login, name, checkSuiteId)
   }
 }

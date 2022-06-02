@@ -4,9 +4,19 @@ import { ObservableRef } from './observable-ref'
 import { createUniqueId, releaseUniqueId } from './id-pool'
 import classNames from 'classnames'
 import { assertNever } from '../../lib/fatal-error'
-import { rectEquals, rectContains } from './rect'
+import { rectEquals, rectContains, offsetRect } from './rect'
 
-export type TooltipDirection = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
+export enum TooltipDirection {
+  NORTH = 'n',
+  NORTH_EAST = 'ne',
+  EAST = 'e',
+  SOUTH_EAST = 'se',
+  SOUTH = 's',
+  SOUTH_WEST = 'sw',
+  WEST = 'w',
+  NORTH_WEST = 'nw',
+}
+
 const DefaultTooltipDelay = 400
 const InteractiveTooltipHideDelay = 250
 
@@ -16,7 +26,7 @@ const InteractiveTooltipHideDelay = 250
 // would be. What we really care about though is the basic methods from Element
 // like setAttribute etc coupled with the pointer-specific events from
 // HTMLElement like mouseenter, mouseleave etc. So we make our own type here.
-type TooltipTarget = Element & GlobalEventHandlers
+export type TooltipTarget = Element & GlobalEventHandlers
 
 export interface ITooltipProps<T> {
   /**
@@ -75,6 +85,30 @@ export interface ITooltipProps<T> {
    * bounds. Typically this is used in conjunction with an ellipsis CSS ruleset.
    */
   readonly onlyWhenOverflowed?: boolean
+
+  /**
+   * Optional, custom overrided of the Tooltip components internal logic for
+   * determining whether the tooltip target is overflowed or not.
+   *
+   * The internal overflow logic is simple and relies on the target itself
+   * having the `text-overflow` CSS rule applied to it. In some scenarios
+   * consumers may have a deep child element which is the one that should be
+   * tested for overflow while still having the parent element be the pointer
+   * device hit area.
+   *
+   * Consumers may pass a boolean if the overflowed state is known at render
+   * time or they may pass a function which gets executed just before showing
+   * the tooltip.
+   */
+  readonly isTargetOverflowed?: ((target: TooltipTarget) => boolean) | boolean
+
+  /**
+   * Optional parameter to be able offset the position of the target element
+   * relative to the window. This can be useful in scenarios where the target's
+   * natural positioning is not already relative to the window such as an
+   * element within in iframe.
+   */
+  readonly tooltipOffset?: DOMRect
 }
 
 interface ITooltipState {
@@ -191,6 +225,9 @@ export class Tooltip<T extends TooltipTarget> extends React.Component<
         measure: false,
         id: this.state.id ?? createUniqueId('tooltip'),
       })
+      this.state.target?.dispatchEvent(
+        new CustomEvent('tooltip-shown', { bubbles: true })
+      )
       this.resizeObserver.observe(elem)
       if (this.props.interactive === true) {
         elem.addEventListener('mouseenter', this.onTooltipMouseEnter)
@@ -244,6 +281,8 @@ export class Tooltip<T extends TooltipTarget> extends React.Component<
     elem.addEventListener('mousedown', this.onTargetMouseDown)
     elem.addEventListener('focus', this.onTargetFocus)
     elem.addEventListener('blur', this.onTargetBlur)
+    elem.addEventListener('tooltip-shown', this.onTooltipShown)
+    elem.addEventListener('tooltip-hidden', this.onTooltipHidden)
   }
 
   private removeTooltip(prevTarget: TooltipTarget | null) {
@@ -291,12 +330,60 @@ export class Tooltip<T extends TooltipTarget> extends React.Component<
     }
   }
 
+  /**
+   * Event handler for the custom event 'tooltip-shown'
+   *
+   * Whenever a tooltip is shown for a target it dispatches the 'tooltip-shown'
+   * event on that target element which then bubbles upwards. We use this to
+   * know when a tooltip is shown for a child component of a tooltip target
+   * such that we can close the parent tooltip.
+   */
+  private onTooltipShown = (event: Event) => {
+    if (event.target !== this.state.target && this.state.show) {
+      this.hideTooltip()
+    }
+  }
+
+  /**
+   * Event handler for the custom event 'tooltip-hidden'
+   *
+   * Whenever a tooltip is shown for a target it dispatches the 'tooltip-shown'
+   * event on that target element which then bubbles upwards. We use this to
+   * know when a tooltip for a child component gets hidden such that we can
+   * show the parent components tooltip again should the mouse still be over
+   * the tooltip target.
+   */
+  private onTooltipHidden = (event: Event) => {
+    if (event.target !== this.state.target && this.mouseOverTarget) {
+      this.beginShowTooltip()
+    }
+  }
+
   private beginShowTooltip() {
     this.cancelShowTooltip()
     this.showTooltipTimeout = window.setTimeout(
       this.showTooltip,
       this.props.delay ?? DefaultTooltipDelay
     )
+  }
+
+  private isTargetOverflowed() {
+    const { isTargetOverflowed } = this.props
+    const { target } = this.state
+
+    if (target === null) {
+      return false
+    }
+
+    if (isTargetOverflowed === undefined) {
+      return target.scrollWidth > target.clientWidth
+    }
+
+    if (typeof isTargetOverflowed === 'boolean') {
+      return isTargetOverflowed
+    }
+
+    return isTargetOverflowed(target)
   }
 
   private showTooltip = () => {
@@ -307,22 +394,27 @@ export class Tooltip<T extends TooltipTarget> extends React.Component<
       return
     }
 
-    if (this.props.onlyWhenOverflowed) {
-      if (!isOverflowed(target)) {
-        return
-      }
+    if (this.props.onlyWhenOverflowed && !this.isTargetOverflowed()) {
+      return
     }
 
     this.setState({
       measure: true,
       show: false,
-      targetRect:
-        this.props.direction === undefined
-          ? this.mouseRect
-          : target.getBoundingClientRect(),
+      targetRect: this.getTargetRect(target),
       hostRect: tooltipHost.getBoundingClientRect(),
       windowRect: new DOMRect(0, 0, window.innerWidth, window.innerHeight),
     })
+  }
+
+  private getTargetRect(target: TooltipTarget) {
+    const { direction, tooltipOffset } = this.props
+
+    return offsetRect(
+      direction === undefined ? this.mouseRect : target.getBoundingClientRect(),
+      tooltipOffset?.x ?? 0,
+      tooltipOffset?.y ?? 0
+    )
   }
 
   private cancelShowTooltip() {
@@ -353,6 +445,13 @@ export class Tooltip<T extends TooltipTarget> extends React.Component<
   private hideTooltip = () => {
     this.cancelShowTooltip()
     this.cancelHideTooltip()
+
+    if (this.state.show) {
+      this.state.target?.dispatchEvent(
+        new CustomEvent('tooltip-hidden', { bubbles: true })
+      )
+    }
+
     this.setState({ show: false, measure: false })
   }
 
@@ -389,7 +488,7 @@ export class Tooltip<T extends TooltipTarget> extends React.Component<
 
     const direction = visible
       ? getDirection(this.props.direction, targetRect, windowRect, tooltipRect)
-      : 's'
+      : TooltipDirection.SOUTH
 
     const style: React.CSSProperties = visible
       ? getTooltipPositionStyle(direction, targetRect, hostRect, tooltipRect)
@@ -455,14 +554,14 @@ function getDirection(
     rectContains(window, getTooltipRectRelativeTo(target, direction, tooltip))
 
   let candidates = new Set<TooltipDirection>([
-    'n',
-    'ne',
-    'nw',
-    's',
-    'se',
-    'sw',
-    'e',
-    'w',
+    TooltipDirection.NORTH,
+    TooltipDirection.NORTH_EAST,
+    TooltipDirection.NORTH_WEST,
+    TooltipDirection.SOUTH,
+    TooltipDirection.SOUTH_EAST,
+    TooltipDirection.SOUTH_WEST,
+    TooltipDirection.EAST,
+    TooltipDirection.WEST,
   ])
 
   // We'll attempt to honor the desired placement but if it won't fit we'll
@@ -473,17 +572,31 @@ function getDirection(
     }
 
     // Try to respect the desired direction by changing the order
-    if (direction.startsWith('s')) {
-      candidates = new Set(['s', 'se', 'sw', ...candidates])
-    } else if (direction.startsWith('n')) {
-      candidates = new Set(['n', 'ne', 'nw', ...candidates])
+    if (direction.startsWith(TooltipDirection.SOUTH)) {
+      candidates = new Set([
+        TooltipDirection.SOUTH,
+        TooltipDirection.SOUTH_EAST,
+        TooltipDirection.SOUTH_WEST,
+        ...candidates,
+      ])
+    } else if (direction.startsWith(TooltipDirection.NORTH)) {
+      candidates = new Set([
+        TooltipDirection.NORTH,
+        TooltipDirection.NORTH_EAST,
+        TooltipDirection.NORTH_WEST,
+        ...candidates,
+      ])
     }
 
     // We already know it won't fit
     candidates.delete(direction)
   } else {
     // Placement based on mouse position, prefer south east, north east
-    candidates = new Set(['se', 'ne', ...candidates])
+    candidates = new Set([
+      TooltipDirection.SOUTH_EAST,
+      TooltipDirection.NORTH_EAST,
+      ...candidates,
+    ])
   }
 
   for (const candidate of candidates) {
@@ -493,7 +606,7 @@ function getDirection(
   }
 
   // Fall back to south even though it doesn't fit
-  return 's'
+  return TooltipDirection.SOUTH
 }
 
 function getTooltipPositionStyle(
@@ -522,21 +635,21 @@ function getTooltipRectRelativeTo(
   const tip = new DOMRect(10, 0, 6, 6)
 
   switch (direction) {
-    case 'ne':
+    case TooltipDirection.NORTH_EAST:
       return new DOMRect(xMid - tip.x - tip.width, yTop - tip.height, w, h)
-    case 'n':
+    case TooltipDirection.NORTH:
       return new DOMRect(xMid - w / 2, yTop - tip.height, w, h)
-    case 'nw':
+    case TooltipDirection.NORTH_WEST:
       return new DOMRect(xMid - w + tip.right, yTop - tip.height, w, h)
-    case 'e':
+    case TooltipDirection.EAST:
       return new DOMRect(xRight + tip.width, yMid, w, h)
-    case 'se':
+    case TooltipDirection.SOUTH_EAST:
       return new DOMRect(xMid - tip.x - tip.width, yBotttom + tip.height, w, h)
-    case 's':
+    case TooltipDirection.SOUTH:
       return new DOMRect(xMid - w / 2, yBotttom + tip.height, w, h)
-    case 'sw':
+    case TooltipDirection.SOUTH_WEST:
       return new DOMRect(xMid - w + tip.right, yBotttom + tip.height, w, h)
-    case 'w':
+    case TooltipDirection.WEST:
       return new DOMRect(xLeft - w - tip.width, yMid, w, h)
     default:
       return assertNever(direction, `Unknown direction ${direction}`)
@@ -547,5 +660,3 @@ const tooltipHostFor = (target: Element | undefined | null) =>
   target?.closest('.tooltip-host') ?? document.body
 
 const stopPropagation = (e: React.SyntheticEvent) => e.stopPropagation()
-
-const isOverflowed = (elem: Element) => elem.scrollWidth > elem.clientWidth

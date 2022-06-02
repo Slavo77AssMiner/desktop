@@ -5,15 +5,7 @@ import { Commit, CommitOneLine } from '../../models/commit'
 import { CommitListItem } from './commit-list-item'
 import { List } from '../lib/list'
 import { arrayEquals } from '../../lib/equality'
-import { Popover, PopoverCaretPosition } from '../lib/popover'
-import { Button } from '../lib/button'
-import { encodePathAsUrl } from '../../lib/path'
 import { DragData, DragType } from '../../models/drag-drop'
-import {
-  AvailableDragAndDropIntroKeys,
-  AvailableDragAndDropIntros,
-  DragAndDropIntroType,
-} from './drag-and-drop-intro'
 
 const RowHeight = 50
 
@@ -63,7 +55,7 @@ interface ICommitListProps {
   /** Callback to fire to revert a given commit in the current repository */
   readonly onRevertCommit: ((commit: Commit) => void) | undefined
 
-  readonly onAmendCommit?: () => void
+  readonly onAmendCommit?: (commit: Commit, isLocalCommit: boolean) => void
 
   /** Callback to fire to open a given commit on GitHub */
   readonly onViewCommitOnGitHub: (sha: string) => void
@@ -123,12 +115,6 @@ interface ICommitListProps {
   /** Whether or not commits in this list can be reordered. */
   readonly reorderingEnabled: boolean
 
-  /* Types of drag and drop intros already seen by the user */
-  readonly dragAndDropIntroTypesShown: ReadonlySet<DragAndDropIntroType>
-
-  /** Callback to fire when a drag & drop intro popover has been seen */
-  readonly onDragAndDropIntroSeen: (intro: DragAndDropIntroType) => void
-
   /** Whether a cherry pick is progress */
   readonly isCherryPickInProgress: boolean
 
@@ -145,29 +131,9 @@ interface ICommitListProps {
   readonly disableSquashing?: boolean
 }
 
-interface ICommitListState {
-  /** Remaining drag and drop intros to show in the popover. */
-  readonly remainingDragAndDropIntros: ReadonlyArray<DragAndDropIntroType>
-}
-
 /** A component which displays the list of commits. */
-export class CommitList extends React.Component<
-  ICommitListProps,
-  ICommitListState
-> {
+export class CommitList extends React.Component<ICommitListProps, {}> {
   private commitsHash = memoize(makeCommitsHash, arrayEquals)
-
-  public constructor(props: ICommitListProps) {
-    super(props)
-
-    const remainingDragAndDropIntros = AvailableDragAndDropIntroKeys.filter(
-      intro => !props.dragAndDropIntroTypesShown.has(intro)
-    )
-
-    this.state = {
-      remainingDragAndDropIntros,
-    }
-  }
 
   private getVisibleCommits(): ReadonlyArray<Commit> {
     const commits = new Array<Commit>()
@@ -217,7 +183,7 @@ export class CommitList extends React.Component<
         gitHubRepository={this.props.gitHubRepository}
         isLocal={isLocal}
         canBeUndone={this.props.canUndoCommits && isLocal && row === 0}
-        canBeAmended={this.props.canAmendCommits && isLocal && row === 0}
+        canBeAmended={this.props.canAmendCommits && row === 0}
         canBeResetTo={this.props.canResetToCommits && isResettableCommit}
         showUnpushedIndicator={showUnpushedIndicator}
         unpushedIndicatorTitle={this.getUnpushedIndicatorTitle(
@@ -357,55 +323,6 @@ export class CommitList extends React.Component<
     return this.props.commitSHAs.findIndex(s => s === sha)
   }
 
-  private renderCherryPickIntroPopover() {
-    if (this.state.remainingDragAndDropIntros.length === 0) {
-      return null
-    }
-
-    const cherryPickIntro = encodePathAsUrl(
-      __dirname,
-      'static/cherry-pick-intro.png'
-    )
-
-    const nextButtonTitle =
-      this.state.remainingDragAndDropIntros.length > 1 ? 'Next' : 'Got it'
-
-    const introType = this.state.remainingDragAndDropIntros[0]
-    const intro = AvailableDragAndDropIntros[introType]
-
-    return (
-      <Popover caretPosition={PopoverCaretPosition.LeftTop}>
-        <img src={cherryPickIntro} className="cherry-pick-intro" />
-        <h3>
-          {intro.title}
-          <span className="call-to-action-bubble">New</span>
-        </h3>
-        <p>{intro.body}</p>
-        <div>
-          <Button onClick={this.onNextDragAndDropIntro} type="submit">
-            {nextButtonTitle}
-          </Button>
-        </div>
-      </Popover>
-    )
-  }
-
-  private onNextDragAndDropIntro = () => {
-    if (this.state.remainingDragAndDropIntros.length === 0) {
-      return
-    }
-
-    const intro = this.state.remainingDragAndDropIntros[0]
-
-    this.setState({
-      remainingDragAndDropIntros: this.state.remainingDragAndDropIntros.slice(
-        1
-      ),
-    })
-
-    this.props.onDragAndDropIntroSeen(intro)
-  }
-
   public render() {
     if (this.props.commitSHAs.length === 0) {
       return (
@@ -436,7 +353,6 @@ export class CommitList extends React.Component<
           }}
           setScrollTop={this.props.compareListScrollTop}
         />
-        {this.renderCherryPickIntroPopover()}
       </div>
     )
   }

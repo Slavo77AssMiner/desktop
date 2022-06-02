@@ -22,7 +22,7 @@ import { enableLineChangesInCommit } from '../feature-flag'
  * Map the raw status text from Git to an app-friendly value
  * shamelessly borrowed from GitHub Desktop (Windows)
  */
-function mapStatus(
+export function mapStatus(
   rawStatus: string,
   oldPath?: string
 ): PlainFileStatus | CopiedOrRenamedFileStatus | UntrackedFileStatus {
@@ -201,9 +201,10 @@ export async function getChangedFiles(
   }
 }
 
-function parseChangedFilesNumStat(
-  stdout: string
-): { linesAdded: number; linesDeleted: number } {
+function parseChangedFilesNumStat(stdout: string): {
+  linesAdded: number
+  linesDeleted: number
+} {
   const lines = stdout.split('\0')
   let totalLinesAdded = 0
   let totalLinesDeleted = 0

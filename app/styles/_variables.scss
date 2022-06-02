@@ -20,6 +20,7 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
 
   --text-color: #{$gray-900};
   --text-secondary-color: #{$gray-500};
+  --text-secondary-color-muted: #{lighten($gray-500, 30%)};
   --background-color: #{$white};
 
   --button-height: 25px;
@@ -32,6 +33,7 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
 
   --link-button-color: #{$blue};
   --link-button-hover-color: #{$blue-600};
+  --link-button-selected-hover-color: #{$blue-200};
 
   --secondary-button-background: #{$gray-000};
   --secondary-button-hover-background: #{$white};
@@ -44,6 +46,7 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
    * (like a circle badge icon)
    */
   --badge-icon-color: #{$white};
+  --warning-badge-icon-color: #{$orange};
 
   // Typography
   //
@@ -186,7 +189,7 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
    */
   --commit-warning-badge-background-color: #{$gray-000};
   --commit-warning-badge-border-color: #{$gray-300};
-  --commit-warning-badge-icon-color: #{$gray-900};
+  --commit-warning-badge-icon-color: var(--warning-badge-icon-color);
 
   /**
    * The height of the title bar area on Win32 platforms
@@ -308,6 +311,9 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
   --nudge-arrow-z-index: 16;
   --drag-overlay-z-index: 15;
   --side-panel-z-index: 14;
+  // We want second level to fall under top level when scrolling
+  --list-sticky-header-top-level-z-index: 11;
+  --list-sticky-header-second-level-z-index: 10;
 
   /**
    * Toast notifications are shown temporarily for things like the zoom
@@ -431,6 +437,11 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
   --dialog-information-color: #{$blue-400};
   --dialog-error-color: #{$red};
 
+  /** File warning */
+  --file-warning-background-color: #{$yellow-200};
+  --file-warning-color: #{$yellow-800};
+  --file-warning-border-color: #{rgba($yellow-700, 0.4)};
+
   /** Tooltips */
   --tooltip-background-color: #{$gray-900};
   --tooltip-color: #{$gray-100};
@@ -461,19 +472,20 @@ $overlay-background-color: rgba(0, 0, 0, 0.4);
   --pr-open-icon-color: #{$green-500};
   --pr-draft-icon-color: #{$gray-500};
 
+  // PR review colors
+  --pr-timeline-line-color: var(--box-border-color);
+  --pr-changes-requested-icon-color: #{$white};
+  --pr-changes-requested-icon-background-color: #cf222e;
+  --pr-approved-icon-color: #{$white};
+  --pr-approved-icon-background-color: #2da44e;
+  --pr-commented-icon-color: var(--md-fg-muted-color);
+  --pr-commented-icon-background-color: #eaeef2;
+
   --call-to-action-bubble-border-color: #{$green};
   --call-to-action-bubble-color: #{$green};
 
   --title-tool-tip-background-color: rgb(236, 236, 236);
   --title-tool-tip-shadow: 1px 2px 5px 0px rgb(125, 125, 125, 0.5);
-
-  // Actions check run variables
-  --check-run-bg-color: #24292f; // #010409
-  --check-run-border-color: hsl(210deg 18% 87%);
-  --check-run-text-primary-color: #f6f8fa; // #c9d1d9
-  --check-run-step-header-open-bg-color: #32383f; // #161b22
-  --check-run-header-label-text-color: #d0d7de; // #8b949e
-  --check-run-text-secondary-color: #8c959f; // #8b949e
 
   // Markdown colors
   --md-border-default-color: #d0d7de;

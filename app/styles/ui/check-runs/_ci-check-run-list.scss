@@ -1,30 +1,33 @@
 .ci-check-run-list {
-  max-height: 585px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  border-radius: var(--border-radius);
-
-  .ci-check-app-header {
-    background-color: var(--box-alt-background-color);
-    border-bottom: var(--base-border);
-    display: flex;
-    align-items: center;
-    padding: var(--spacing-half) var(--spacing);
-    min-height: 35px;
-
-    .ci-check-app-name {
-      font-weight: var(--font-weight-semibold);
-      flex: 1;
-    }
-
-    .open-closed-icon {
-      margin-right: var(--spacing-half);
-    }
-
-    &:last-child {
-      .ci-check-app-header {
-        border: none;
+  :first-child {
+    &.ci-check-run-list-group {
+      :first-child {
+        &.ci-check-run-list-group-header {
+          &.condensed {
+            padding-top: 0;
+          }
+        }
       }
+    }
+  }
+
+  .ci-check-run-list-group-header {
+    position: sticky;
+    top: 0;
+    padding: var(--spacing-half) var(--spacing);
+    background-color: var(--background-color);
+    border-bottom: var(--base-border);
+    filter: brightness(98%);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+    z-index: var(--list-sticky-header-top-level-z-index);
+
+    &.condensed {
+      font-weight: var(--font-weight-semibold);
+      background-color: inherit;
+      border-bottom: none;
+      padding: var(--spacing-half);
     }
   }
 }

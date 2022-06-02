@@ -18,12 +18,14 @@
 @import 'dialogs/thank-you';
 @import 'dialogs/commit-message';
 @import 'dialogs/choose-branch';
+@import 'dialogs/ci-check-run-rerun';
 
 // The styles herein attempt to follow a flow where margins are only applied
 // to the bottom of elements (with the exception of the last child). This to
 // allow easy layout using generalized components and elements such as <Row>
 // and <p>.
 dialog {
+  overflow: unset;
   // These are the 24px versions of the alert and stop octicons
   // from oction v10.0.0
   //
@@ -49,6 +51,10 @@ dialog {
 
   min-width: 400px;
   max-width: 600px;
+
+  .secondary-text {
+    color: var(--text-secondary-color);
+  }
 
   // Substitute the appear/exit animations with a fade in fade out effect if the
   // user prefers reduced motion.
@@ -141,12 +147,16 @@ dialog {
       margin-right: var(--spacing);
     }
 
+    .spin {
+      margin-left: var(--spacing);
+    }
+
     h1 {
       font-weight: var(--font-weight-semibold);
       font-size: var(--font-size-md);
       margin: 0;
       padding: 0;
-      margin-right: var(--spacing);
+      width: 100%;
 
       @include ellipsis;
     }
@@ -380,6 +390,9 @@ dialog {
   }
   &#create-branch {
     width: 400px;
+    .link-button-component {
+      display: inline;
+    }
   }
   &#push-branch-commits {
     width: 450px;
@@ -442,6 +455,11 @@ dialog {
 
   &#lfs-attribute-mismatch {
     width: 400px;
+  }
+
+  &#pull-request-checks-failed {
+    max-width: none;
+    width: 910px;
   }
 
   &#workflow-push-rejected {
